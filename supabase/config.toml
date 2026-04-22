@@ -1,1 +1,4 @@
 project_id = "toyqmdzjaoxkvmkrtpre"
+
+[functions.tryon-generate]
+verify_jwt = false
