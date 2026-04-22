@@ -2,12 +2,8 @@ import { useCallback, useRef, useState } from "react";
 import { Upload, ImageIcon, Sparkles, Download, RefreshCw, X } from "lucide-react";
 import { toast } from "sonner";
 import Reveal from "@/components/Reveal";
+import { supabase } from "@/integrations/supabase/client";
 
-/* ------------------------------------------------------------------ */
-/* Configuration — point this to your Flask backend when ready.       */
-/* The mock fallback returns the person image so the UI is demo-ready.*/
-/* ------------------------------------------------------------------ */
-const TRYON_ENDPOINT = import.meta.env.VITE_TRYON_ENDPOINT as string | undefined;
 const MAX_FILE_MB = 10;
 const ACCEPTED = ["image/png", "image/jpeg", "image/webp"];
 
@@ -127,6 +123,15 @@ const TryOn = () => {
     setResult(null);
   }, []);
 
+  /** Read a File as a base64 data URL ("data:image/...;base64,..."). */
+  const fileToDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+
   const generate = async () => {
     if (!person || !garment) {
       toast.error("Please upload both a person and a garment image.");
@@ -136,21 +141,35 @@ const TryOn = () => {
     setResult(null);
 
     try {
-      if (TRYON_ENDPOINT) {
-        // Real backend path — POST multipart to Flask /tryon
-        const fd = new FormData();
-        fd.append("person", person);
-        fd.append("garment", garment);
-        const res = await fetch(TRYON_ENDPOINT, { method: "POST", body: fd });
-        if (!res.ok) throw new Error("Inference failed");
-        const data = await res.json();
-        // Expected: { image_base64: "data:image/png;base64,..." }
-        setResult(data.image_base64 || data.image);
-      } else {
-        // Mock path — simulates network + returns the person image as result.
-        await new Promise((r) => setTimeout(r, 2400));
-        setResult(personPreview);
+      // Convert both files to base64 data URLs for the edge function payload.
+      const [personImage, garmentImage] = await Promise.all([
+        fileToDataUrl(person),
+        fileToDataUrl(garment),
+      ]);
+
+      const { data, error } = await supabase.functions.invoke("tryon-generate", {
+        body: { personImage, garmentImage },
+      });
+
+      if (error) {
+        // Surface friendly messages for rate-limit / payment errors from the function.
+        const ctx = (error as { context?: { status?: number } }).context;
+        if (ctx?.status === 429) {
+          toast.error("Too many requests. Please wait a moment and retry.");
+        } else if (ctx?.status === 402) {
+          toast.error("AI credits exhausted. Add funds in Workspace → Usage.");
+        } else {
+          toast.error(error.message || "Generation failed.");
+        }
+        return;
       }
+
+      if (!data?.image) {
+        toast.error("The model did not return an image. Please try again.");
+        return;
+      }
+
+      setResult(data.image);
       toast.success("Try-on generated successfully");
     } catch (e) {
       console.error(e);
