@@ -32,19 +32,18 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Carefully crafted prompt for a virtual try-on composition.
-    const prompt = [
-      "You are a professional virtual try-on AI for an Eastern cultural fashion brand.",
-      "Image 1 is the PERSON. Image 2 is the GARMENT.",
-      "Generate a single photorealistic image of the SAME person from Image 1 wearing the GARMENT from Image 2.",
-      "Strict requirements:",
-      "- Preserve the person's identity exactly: face, skin tone, hair, body shape, and pose.",
-      "- Keep the original background and lighting from the person photo.",
-      "- Replace ONLY the relevant clothing area with the garment from Image 2.",
-      "- Match the garment's colors, patterns, embroidery, fabric texture and silhouette faithfully.",
-      "- Render natural fabric drape, folds, and shadows so the garment looks realistically worn.",
-      "- Output only the final composed image, no text or watermarks.",
-    ].join(" ");
+    // Label each image inline so the model can tell them apart and is
+    // forced to swap the person's outfit for the NEW garment.
+    const systemInstruction =
+      "You are a virtual try-on image generator. Output exactly ONE photorealistic image (no text). " +
+      "You will receive two reference images: the PERSON and the NEW GARMENT. " +
+      "Your task: render the SAME person from the PERSON image now WEARING the NEW GARMENT, " +
+      "fully REPLACING whatever clothing they are currently wearing. " +
+      "Identity: preserve face, skin tone, hair, body shape, and pose from the PERSON image. " +
+      "Background: keep the original background and lighting from the PERSON image. " +
+      "Garment: the output MUST clearly show the NEW GARMENT — do NOT keep the original outfit. " +
+      "Match the new garment's exact color, pattern, embroidery, fabric texture, neckline, sleeves and silhouette. " +
+      "Render realistic drape, folds and shadows so the garment looks naturally worn on this person.";
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
@@ -58,9 +57,12 @@ Deno.serve(async (req) => {
           {
             role: "user",
             content: [
-              { type: "text", text: prompt },
+              { type: "text", text: systemInstruction },
+              { type: "text", text: "REFERENCE 1 — PERSON (keep identity, pose, background, lighting):" },
               { type: "image_url", image_url: { url: personImage } },
+              { type: "text", text: "REFERENCE 2 — NEW GARMENT (this is the clothing item to put ON the person, replacing whatever they are currently wearing):" },
               { type: "image_url", image_url: { url: garmentImage } },
+              { type: "text", text: "Now generate the final image: the person from REFERENCE 1 wearing the garment from REFERENCE 2. Their original outfit must be entirely replaced by the new garment. Output only the image." },
             ],
           },
         ],
