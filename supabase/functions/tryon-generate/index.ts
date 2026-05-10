@@ -1,16 +1,25 @@
 /**
  * tryon-generate — Virtual try-on edge function.
  *
- * Accepts a person image and a garment image (both base64 data URLs),
- * sends them to the Lovable AI Gateway using Google's Gemini image model,
- * and returns the generated composite of the person wearing the garment.
+ * Uses Replicate's hosted OOTDiffusion model (viktorfa/oot_diffusion)
+ * to generate a photorealistic image of a person wearing the supplied garment.
+ *
+ * Inputs (JSON body):
+ *   - personImage:  data URL (data:image/...;base64,...)
+ *   - garmentImage: data URL (data:image/...;base64,...)
+ *   - category?:    "upperbody" | "lowerbody" | "dress"  (default: "upperbody")
  */
 import { corsHeaders } from "https://esm.sh/@supabase/supabase-js@2.95.0/cors";
 
 interface TryOnRequest {
-  personImage: string;  // data URL: data:image/...;base64,...
-  garmentImage: string; // data URL: data:image/...;base64,...
+  personImage: string;
+  garmentImage: string;
+  category?: "upperbody" | "lowerbody" | "dress";
 }
+
+const REPLICATE_MODEL = "viktorfa/oot_diffusion";
+const POLL_INTERVAL_MS = 1500;
+const MAX_POLL_MS = 120_000; // 2 min safety cap
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -18,12 +27,14 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) {
-      throw new Error("LOVABLE_API_KEY is not configured");
+    const REPLICATE_API_TOKEN = Deno.env.get("REPLICATE_API_TOKEN");
+    if (!REPLICATE_API_TOKEN) {
+      throw new Error("REPLICATE_API_TOKEN is not configured");
     }
 
-    const { personImage, garmentImage } = (await req.json()) as TryOnRequest;
+    const body = (await req.json()) as TryOnRequest;
+    const { personImage, garmentImage } = body;
+    const category = body.category ?? "upperbody";
 
     if (!personImage || !garmentImage) {
       return new Response(
@@ -32,83 +43,133 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Label each image inline so the model can tell them apart and is
-    // forced to swap the person's outfit for the NEW garment.
-    const systemInstruction =
-      "You are a virtual try-on image generator. Output exactly ONE photorealistic image (no text). " +
-      "You will receive two reference images: the PERSON and the NEW GARMENT. " +
-      "Your task: render the SAME person from the PERSON image now WEARING the NEW GARMENT, " +
-      "fully REPLACING whatever clothing they are currently wearing. " +
-      "Identity: preserve face, skin tone, hair, body shape, and pose from the PERSON image. " +
-      "Background: keep the original background and lighting from the PERSON image. " +
-      "Garment: the output MUST clearly show the NEW GARMENT — do NOT keep the original outfit. " +
-      "Match the new garment's exact color, pattern, embroidery, fabric texture, neckline, sleeves and silhouette. " +
-      "Render realistic drape, folds and shadows so the garment looks naturally worn on this person.";
-
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash-image",
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: systemInstruction },
-              { type: "text", text: "REFERENCE 1 — PERSON (keep identity, pose, background, lighting):" },
-              { type: "image_url", image_url: { url: personImage } },
-              { type: "text", text: "REFERENCE 2 — NEW GARMENT (this is the clothing item to put ON the person, replacing whatever they are currently wearing):" },
-              { type: "image_url", image_url: { url: garmentImage } },
-              { type: "text", text: "Now generate the final image: the person from REFERENCE 1 wearing the garment from REFERENCE 2. Their original outfit must be entirely replaced by the new garment. Output only the image." },
-            ],
+    // Kick off the prediction. Using the model-scoped predictions endpoint
+    // means Replicate will run the model's default published version.
+    const createRes = await fetch(
+      `https://api.replicate.com/v1/models/${REPLICATE_MODEL}/predictions`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Token ${REPLICATE_API_TOKEN}`,
+          "Content-Type": "application/json",
+          Prefer: "wait=60", // ask Replicate to wait up to 60s before returning
+        },
+        body: JSON.stringify({
+          input: {
+            model_image: personImage,
+            garment_image: garmentImage,
+            category,
+            steps: 20,
+            guidance_scale: 2,
+            seed: 0,
           },
-        ],
-        modalities: ["image", "text"],
-      }),
-    });
+        }),
+      },
+    );
 
-    if (!response.ok) {
-      if (response.status === 429) {
+    if (!createRes.ok) {
+      const errText = await createRes.text();
+      console.error("Replicate create error:", createRes.status, errText);
+      if (createRes.status === 401 || createRes.status === 403) {
         return new Response(
-          JSON.stringify({ error: "Rate limits exceeded, please try again later." }),
-          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          JSON.stringify({ error: "Invalid Replicate API token." }),
+          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
-      if (response.status === 402) {
+      if (createRes.status === 402) {
         return new Response(
-          JSON.stringify({
-            error: "AI credits exhausted. Please add funds to your Lovable AI workspace.",
-          }),
+          JSON.stringify({ error: "Replicate credits exhausted. Add billing on replicate.com." }),
           { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
-      const errText = await response.text();
-      console.error("AI gateway error:", response.status, errText);
+      if (createRes.status === 429) {
+        return new Response(
+          JSON.stringify({ error: "Rate limited by Replicate. Please retry shortly." }),
+          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
       return new Response(
-        JSON.stringify({ error: "AI gateway error" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        JSON.stringify({ error: "Replicate API error", details: errText.slice(0, 500) }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    const data = await response.json();
-    // Gemini image models return the generated image as a base64 data URL
-    // inside choices[0].message.images[0].image_url.url
-    const generated: string | undefined =
-      data?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+    let prediction = await createRes.json();
 
-    if (!generated) {
-      console.error("No image returned from gateway:", JSON.stringify(data).slice(0, 800));
+    // Poll until the prediction finishes (succeeded / failed / canceled).
+    const start = Date.now();
+    while (
+      prediction.status !== "succeeded" &&
+      prediction.status !== "failed" &&
+      prediction.status !== "canceled"
+    ) {
+      if (Date.now() - start > MAX_POLL_MS) {
+        return new Response(
+          JSON.stringify({ error: "Try-on generation timed out. Please try again." }),
+          { status: 504, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+
+      const pollRes = await fetch(prediction.urls.get, {
+        headers: { Authorization: `Token ${REPLICATE_API_TOKEN}` },
+      });
+      if (!pollRes.ok) {
+        const t = await pollRes.text();
+        console.error("Replicate poll error:", pollRes.status, t);
+        return new Response(
+          JSON.stringify({ error: "Failed polling Replicate prediction." }),
+          { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+      prediction = await pollRes.json();
+    }
+
+    if (prediction.status !== "succeeded") {
+      console.error("Replicate prediction failed:", prediction.error, prediction.logs);
+      return new Response(
+        JSON.stringify({
+          error: "Try-on generation failed.",
+          details: prediction.error ?? "Unknown model error",
+        }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // OOTDiffusion returns either a single URL string or an array of URLs.
+    const output = prediction.output;
+    const imageUrl: string | undefined = Array.isArray(output) ? output[0] : output;
+
+    if (!imageUrl || typeof imageUrl !== "string") {
+      console.error("No image in Replicate output:", JSON.stringify(output).slice(0, 500));
       return new Response(
         JSON.stringify({ error: "Model did not return an image. Please retry." }),
         { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
+    // Fetch the image and convert to a base64 data URL so the frontend
+    // (which expects `image` as a data URL, like the previous Gemini flow)
+    // doesn't need any changes.
+    const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) {
+      return new Response(
+        JSON.stringify({ error: "Failed to download generated image." }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+    const contentType = imgRes.headers.get("content-type") ?? "image/png";
+    const buf = new Uint8Array(await imgRes.arrayBuffer());
+    // Encode in chunks to avoid call-stack issues on large images.
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < buf.length; i += chunk) {
+      binary += String.fromCharCode(...buf.subarray(i, i + chunk));
+    }
+    const dataUrl = `data:${contentType};base64,${btoa(binary)}`;
+
     return new Response(
-      JSON.stringify({ image: generated }),
+      JSON.stringify({ image: dataUrl }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (e) {
