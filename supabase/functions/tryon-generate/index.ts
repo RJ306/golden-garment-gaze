@@ -1,25 +1,121 @@
 /**
- * tryon-generate — Virtual try-on edge function.
+ * tryon-generate — Virtual try-on edge function (FREE tier).
  *
- * Uses Replicate's hosted OOTDiffusion model (viktorfa/oot_diffusion)
- * to generate a photorealistic image of a person wearing the supplied garment.
+ * Calls the public Hugging Face Space `levihsu/OOTDiffusion` via its
+ * Gradio API. No API key required, but the Space is shared/queued so
+ * generations can be slow (30s – a few minutes) and may fail when the
+ * Space is asleep or rate-limited.
  *
- * Inputs (JSON body):
+ * Request body:
  *   - personImage:  data URL (data:image/...;base64,...)
  *   - garmentImage: data URL (data:image/...;base64,...)
- *   - category?:    "upperbody" | "lowerbody" | "dress"  (default: "upperbody")
+ *   - category?:    "Upper-body" | "Lower-body" | "Dress"  (default: "Upper-body")
  */
 import { corsHeaders } from "https://esm.sh/@supabase/supabase-js@2.95.0/cors";
 
 interface TryOnRequest {
   personImage: string;
   garmentImage: string;
-  category?: "upperbody" | "lowerbody" | "dress";
+  category?: "Upper-body" | "Lower-body" | "Dress";
 }
 
-const REPLICATE_MODEL = "viktorfa/oot_diffusion";
-const POLL_INTERVAL_MS = 1500;
-const MAX_POLL_MS = 120_000; // 2 min safety cap
+const SPACE_BASE = "https://levihsu-ootdiffusion.hf.space";
+const MAX_WAIT_MS = 240_000; // 4 min cap (cold starts can be brutal)
+
+// Convert a data URL to a Blob we can upload to the Gradio Space.
+function dataUrlToBlob(dataUrl: string): { blob: Blob; filename: string } {
+  const match = dataUrl.match(/^data:(.+?);base64,(.*)$/);
+  if (!match) throw new Error("Invalid data URL");
+  const mime = match[1];
+  const b64 = match[2];
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const ext = mime.split("/")[1] || "png";
+  return { blob: new Blob([bytes], { type: mime }), filename: `image.${ext}` };
+}
+
+// Upload a file to the Gradio Space and return the server-side path.
+async function uploadToSpace(blob: Blob, filename: string): Promise<string> {
+  const fd = new FormData();
+  fd.append("files", blob, filename);
+  const res = await fetch(`${SPACE_BASE}/upload`, { method: "POST", body: fd });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`HF upload failed [${res.status}]: ${t.slice(0, 300)}`);
+  }
+  const arr = (await res.json()) as string[];
+  if (!Array.isArray(arr) || !arr[0]) throw new Error("HF upload returned no path");
+  return arr[0];
+}
+
+// Call a Gradio fn via the /call endpoint and poll the SSE result stream.
+async function gradioCall(fnName: string, data: unknown[]): Promise<unknown[]> {
+  const startRes = await fetch(`${SPACE_BASE}/call/${fnName}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data }),
+  });
+  if (!startRes.ok) {
+    const t = await startRes.text();
+    throw new Error(`HF Space rejected request [${startRes.status}]: ${t.slice(0, 300)}`);
+  }
+  const { event_id } = (await startRes.json()) as { event_id: string };
+  if (!event_id) throw new Error("HF Space returned no event_id");
+
+  // Stream the result. Gradio returns SSE: lines like `event: complete\ndata: [...]`.
+  const streamCtrl = new AbortController();
+  const timeout = setTimeout(() => streamCtrl.abort(), MAX_WAIT_MS);
+  let streamRes: Response;
+  try {
+    streamRes = await fetch(`${SPACE_BASE}/call/${fnName}/${event_id}`, {
+      signal: streamCtrl.signal,
+    });
+  } catch (e) {
+    clearTimeout(timeout);
+    throw new Error(`HF Space timed out or unreachable: ${(e as Error).message}`);
+  }
+  if (!streamRes.ok || !streamRes.body) {
+    clearTimeout(timeout);
+    throw new Error(`HF Space stream error [${streamRes.status}]`);
+  }
+
+  const reader = streamRes.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let lastEvent = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.startsWith("event:")) {
+          lastEvent = line.slice(6).trim();
+        } else if (line.startsWith("data:")) {
+          const payload = line.slice(5).trim();
+          if (lastEvent === "complete") {
+            clearTimeout(timeout);
+            try {
+              return JSON.parse(payload) as unknown[];
+            } catch {
+              throw new Error("HF Space returned invalid JSON payload");
+            }
+          }
+          if (lastEvent === "error") {
+            clearTimeout(timeout);
+            throw new Error(`HF Space error: ${payload.slice(0, 300)}`);
+          }
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+  throw new Error("HF Space stream ended without a result (Space may be asleep or overloaded)");
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -27,14 +123,9 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const REPLICATE_API_TOKEN = Deno.env.get("REPLICATE_API_TOKEN");
-    if (!REPLICATE_API_TOKEN) {
-      throw new Error("REPLICATE_API_TOKEN is not configured");
-    }
-
     const body = (await req.json()) as TryOnRequest;
     const { personImage, garmentImage } = body;
-    const category = body.category ?? "upperbody";
+    const category = body.category ?? "Upper-body";
 
     if (!personImage || !garmentImage) {
       return new Response(
@@ -43,114 +134,58 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Kick off the prediction. Using the model-scoped predictions endpoint
-    // means Replicate will run the model's default published version.
-    const createRes = await fetch(
-      `https://api.replicate.com/v1/models/${REPLICATE_MODEL}/predictions`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Token ${REPLICATE_API_TOKEN}`,
-          "Content-Type": "application/json",
-          Prefer: "wait=60", // ask Replicate to wait up to 60s before returning
-        },
-        body: JSON.stringify({
-          input: {
-            model_image: personImage,
-            garment_image: garmentImage,
-            category,
-            steps: 20,
-            guidance_scale: 2,
-            seed: 0,
-          },
-        }),
-      },
-    );
+    // 1. Upload both images to the Space.
+    const person = dataUrlToBlob(personImage);
+    const garment = dataUrlToBlob(garmentImage);
+    const [personPath, garmentPath] = await Promise.all([
+      uploadToSpace(person.blob, `person_${person.filename}`),
+      uploadToSpace(garment.blob, `garment_${garment.filename}`),
+    ]);
 
-    if (!createRes.ok) {
-      const errText = await createRes.text();
-      console.error("Replicate create error:", createRes.status, errText);
-      if (createRes.status === 401 || createRes.status === 403) {
-        return new Response(
-          JSON.stringify({ error: "Invalid Replicate API token." }),
-          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
-      }
-      if (createRes.status === 402) {
-        return new Response(
-          JSON.stringify({ error: "Replicate credits exhausted. Add billing on replicate.com." }),
-          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
-      }
-      if (createRes.status === 429) {
-        return new Response(
-          JSON.stringify({ error: "Rate limited by Replicate. Please retry shortly." }),
-          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
-      }
-      return new Response(
-        JSON.stringify({ error: "Replicate API error", details: errText.slice(0, 500) }),
-        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+    const fileRef = (path: string, mime: string) => ({
+      path,
+      url: `${SPACE_BASE}/file=${path}`,
+      orig_name: path.split("/").pop() ?? "image.png",
+      mime_type: mime,
+      meta: { _type: "gradio.FileData" },
+    });
+
+    // 2. Run the Gradio function. The Space exposes:
+    //    - process_hd  (Upper-body half model, 2 inputs)
+    //    - process_dc  (Full Garment model, takes a category)
+    // We use process_dc so we can support all garment types.
+    //
+    // Inputs for process_dc:
+    //   [vton_img, garm_img, category, n_samples, n_steps, image_scale, seed]
+    const result = await gradioCall("process_dc", [
+      fileRef(personPath, person.blob.type),
+      fileRef(garmentPath, garment.blob.type),
+      category,
+      1,    // n_samples
+      20,   // n_steps
+      2,    // image_scale (guidance)
+      -1,   // seed (random)
+    ]);
+
+    // Gradio returns a Gallery: [[{image: {url}, caption}, ...]]
+    let imageUrl: string | undefined;
+    const first = Array.isArray(result) ? result[0] : undefined;
+    if (Array.isArray(first) && first.length > 0) {
+      const item = first[0] as Record<string, unknown>;
+      const img = (item?.image ?? item) as Record<string, unknown>;
+      imageUrl = (img?.url as string) ??
+        (typeof img?.path === "string" ? `${SPACE_BASE}/file=${img.path}` : undefined);
     }
 
-    let prediction = await createRes.json();
-
-    // Poll until the prediction finishes (succeeded / failed / canceled).
-    const start = Date.now();
-    while (
-      prediction.status !== "succeeded" &&
-      prediction.status !== "failed" &&
-      prediction.status !== "canceled"
-    ) {
-      if (Date.now() - start > MAX_POLL_MS) {
-        return new Response(
-          JSON.stringify({ error: "Try-on generation timed out. Please try again." }),
-          { status: 504, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
-      }
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-
-      const pollRes = await fetch(prediction.urls.get, {
-        headers: { Authorization: `Token ${REPLICATE_API_TOKEN}` },
-      });
-      if (!pollRes.ok) {
-        const t = await pollRes.text();
-        console.error("Replicate poll error:", pollRes.status, t);
-        return new Response(
-          JSON.stringify({ error: "Failed polling Replicate prediction." }),
-          { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
-      }
-      prediction = await pollRes.json();
-    }
-
-    if (prediction.status !== "succeeded") {
-      console.error("Replicate prediction failed:", prediction.error, prediction.logs);
-      return new Response(
-        JSON.stringify({
-          error: "Try-on generation failed.",
-          details: prediction.error ?? "Unknown model error",
-        }),
-        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-
-    // OOTDiffusion returns either a single URL string or an array of URLs.
-    const output = prediction.output;
-    const imageUrl: string | undefined = Array.isArray(output) ? output[0] : output;
-
-    if (!imageUrl || typeof imageUrl !== "string") {
-      console.error("No image in Replicate output:", JSON.stringify(output).slice(0, 500));
+    if (!imageUrl) {
+      console.error("Unexpected HF result shape:", JSON.stringify(result).slice(0, 500));
       return new Response(
         JSON.stringify({ error: "Model did not return an image. Please retry." }),
         { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    // Fetch the image and convert to a base64 data URL so the frontend
-    // (which expects `image` as a data URL, like the previous Gemini flow)
-    // doesn't need any changes.
+    // 3. Download the image and return as base64 data URL (frontend-compatible).
     const imgRes = await fetch(imageUrl);
     if (!imgRes.ok) {
       return new Response(
@@ -160,7 +195,6 @@ Deno.serve(async (req) => {
     }
     const contentType = imgRes.headers.get("content-type") ?? "image/png";
     const buf = new Uint8Array(await imgRes.arrayBuffer());
-    // Encode in chunks to avoid call-stack issues on large images.
     let binary = "";
     const chunk = 0x8000;
     for (let i = 0; i < buf.length; i += chunk) {
@@ -174,9 +208,15 @@ Deno.serve(async (req) => {
     );
   } catch (e) {
     console.error("tryon-generate error:", e);
+    const msg = e instanceof Error ? e.message : "Unknown error";
+    // Most user-visible failures here = HF Space asleep / queued / rate limited.
     return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      JSON.stringify({
+        error:
+          "Free try-on service is busy or asleep. This is normal for the free Hugging Face Space — please wait ~30s and try again.",
+        details: msg,
+      }),
+      { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
 });
