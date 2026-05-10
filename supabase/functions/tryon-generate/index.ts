@@ -194,7 +194,11 @@ Deno.serve(async (req) => {
     // 3. Download the image and return as base64 data URL (frontend-compatible).
     // Normalize URL: Gradio sometimes returns a relative path or a /file= path
     let finalUrl = imageUrl;
+    // Strip any accidental `/call/` prefix that Gradio may inject when the
+    // url is relative to the /call/ endpoint.
+    finalUrl = finalUrl.replace("/call/file=", "/file=");
     if (finalUrl.startsWith("/")) finalUrl = `${SPACE_BASE}${finalUrl}`;
+    if (finalUrl.startsWith("file=")) finalUrl = `${SPACE_BASE}/${finalUrl}`;
     console.log("Downloading generated image from:", finalUrl);
     const imgRes = await fetch(finalUrl, {
       headers: { Referer: SPACE_BASE + "/", "User-Agent": "Mozilla/5.0" },
