@@ -125,7 +125,8 @@ Deno.serve(async (req) => {
   try {
     const body = (await req.json()) as TryOnRequest;
     const { personImage, garmentImage } = body;
-    const category = body.category ?? "Upper-body";
+    // Always use "Dress" category for OOTDiffusion (full-body garment model).
+    const category = "Dress";
 
     if (!personImage || !garmentImage) {
       return new Response(
