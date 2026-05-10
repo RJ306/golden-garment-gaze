@@ -174,8 +174,13 @@ Deno.serve(async (req) => {
     if (Array.isArray(first) && first.length > 0) {
       const item = first[0] as Record<string, unknown>;
       const img = (item?.image ?? item) as Record<string, unknown>;
-      imageUrl = (img?.url as string) ??
-        (typeof img?.path === "string" ? `${SPACE_BASE}/file=${img.path}` : undefined);
+      // Prefer `path` (stable) over `url` (which can be a relative `file=...` that
+      // resolves incorrectly against the /call/ endpoint).
+      if (typeof img?.path === "string") {
+        imageUrl = `${SPACE_BASE}/file=${img.path}`;
+      } else if (typeof img?.url === "string") {
+        imageUrl = img.url as string;
+      }
     }
 
     if (!imageUrl) {
