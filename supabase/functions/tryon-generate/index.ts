@@ -186,10 +186,18 @@ Deno.serve(async (req) => {
     }
 
     // 3. Download the image and return as base64 data URL (frontend-compatible).
-    const imgRes = await fetch(imageUrl);
+    // Normalize URL: Gradio sometimes returns a relative path or a /file= path
+    let finalUrl = imageUrl;
+    if (finalUrl.startsWith("/")) finalUrl = `${SPACE_BASE}${finalUrl}`;
+    console.log("Downloading generated image from:", finalUrl);
+    const imgRes = await fetch(finalUrl, {
+      headers: { Referer: SPACE_BASE + "/", "User-Agent": "Mozilla/5.0" },
+    });
     if (!imgRes.ok) {
+      const t = await imgRes.text().catch(() => "");
+      console.error("Image download failed:", imgRes.status, finalUrl, t.slice(0, 300));
       return new Response(
-        JSON.stringify({ error: "Failed to download generated image." }),
+        JSON.stringify({ error: `Failed to download generated image (${imgRes.status}).`, url: finalUrl }),
         { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
