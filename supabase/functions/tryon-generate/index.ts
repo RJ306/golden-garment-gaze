@@ -192,25 +192,49 @@ Deno.serve(async (req) => {
     }
 
     // 3. Download the image and return as base64 data URL (frontend-compatible).
-    // Normalize URL: Gradio sometimes returns a relative path or a /file= path
-    let finalUrl = imageUrl;
-    // Strip any accidental `/call/` prefix that Gradio may inject when the
-    // url is relative to the /call/ endpoint.
-    finalUrl = finalUrl.replace("/call/file=", "/file=");
-    if (finalUrl.startsWith("/")) finalUrl = `${SPACE_BASE}${finalUrl}`;
-    if (finalUrl.startsWith("file=")) finalUrl = `${SPACE_BASE}/${finalUrl}`;
-    console.log("Downloading generated image from:", finalUrl);
-    const imgRes = await fetch(finalUrl, {
-      headers: { Referer: SPACE_BASE + "/", "User-Agent": "Mozilla/5.0" },
-    });
-    if (!imgRes.ok) {
-      const t = await imgRes.text().catch(() => "");
-      console.error("Image download failed:", imgRes.status, finalUrl, t.slice(0, 300));
+    // Normalize: extract the underlying server path (e.g. /tmp/gradio/.../image.webp)
+    // so we can try multiple Gradio file-serving URL prefixes.
+    let serverPath = imageUrl;
+    serverPath = serverPath.replace(/^https?:\/\/[^/]+/, ""); // strip origin
+    serverPath = serverPath.replace("/call/file=", "/file=");
+    const fileMatch = serverPath.match(/file=(.+)$/);
+    const rawPath = fileMatch ? fileMatch[1] : serverPath.replace(/^\/+/, "");
+
+    // Try every known Gradio file endpoint in order. Different Gradio
+    // versions serve files at different paths.
+    const candidates = [
+      `${SPACE_BASE}/gradio_api/file=${rawPath}`,
+      `${SPACE_BASE}/file=${rawPath}`,
+      `${SPACE_BASE}/file/${rawPath.replace(/^\//, "")}`,
+      imageUrl.startsWith("http") ? imageUrl : `${SPACE_BASE}${imageUrl.startsWith("/") ? "" : "/"}${imageUrl}`,
+    ];
+
+    let imgRes: Response | null = null;
+    let finalUrl = "";
+    for (const url of candidates) {
+      console.log("Trying image URL:", url);
+      try {
+        const r = await fetch(url, {
+          headers: { Referer: SPACE_BASE + "/", "User-Agent": "Mozilla/5.0" },
+        });
+        if (r.ok) {
+          imgRes = r;
+          finalUrl = url;
+          break;
+        }
+        console.log("  -> failed", r.status);
+      } catch (e) {
+        console.log("  -> threw", (e as Error).message);
+      }
+    }
+
+    if (!imgRes) {
       return new Response(
-        JSON.stringify({ error: `Failed to download generated image (${imgRes.status}).`, url: finalUrl }),
+        JSON.stringify({ error: `Failed to download generated image from any known Gradio endpoint.`, tried: candidates }),
         { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
+    console.log("Downloaded from:", finalUrl);
     const contentType = imgRes.headers.get("content-type") ?? "image/png";
     const buf = new Uint8Array(await imgRes.arrayBuffer());
     let binary = "";
