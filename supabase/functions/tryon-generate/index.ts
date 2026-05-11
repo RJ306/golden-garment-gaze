@@ -163,9 +163,9 @@ Deno.serve(async (req) => {
       fileRef(garmentPath, garment.blob.type),
       category,
       1,    // n_samples
-      40,   // n_steps (higher = sharper, more faithful)
-      2.5,  // image_scale (stronger garment guidance)
-      42,   // seed (fixed → deterministic, repeatable results)
+      20,   // n_steps (matches HF Space default that gave good results)
+      2,    // image_scale (matches HF Space default)
+      -1,   // seed (-1 = random, matches HF Space behavior)
     ]);
 
     // Gradio returns a Gallery: [[{image: {url}, caption}, ...]]
