@@ -163,9 +163,9 @@ Deno.serve(async (req) => {
       fileRef(garmentPath, garment.blob.type),
       category,
       1,    // n_samples
-      20,   // n_steps
-      2,    // image_scale (guidance)
-      -1,   // seed (random)
+      40,   // n_steps (higher = sharper, more faithful)
+      2.5,  // image_scale (stronger garment guidance)
+      42,   // seed (fixed → deterministic, repeatable results)
     ]);
 
     // Gradio returns a Gallery: [[{image: {url}, caption}, ...]]
