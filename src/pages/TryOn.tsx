@@ -1,5 +1,5 @@
-import { useCallback, useRef, useState } from "react";
-import { Upload, ImageIcon, Sparkles, Download, RefreshCw, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Upload, ImageIcon, Sparkles, Download, RefreshCw, X, Check } from "lucide-react";
 import { toast } from "sonner";
 import Reveal from "@/components/Reveal";
 import { supabase } from "@/integrations/supabase/client";
@@ -7,7 +7,10 @@ import { supabase } from "@/integrations/supabase/client";
 const MAX_FILE_MB = 10;
 const ACCEPTED = ["image/png", "image/jpeg", "image/webp"];
 
+const STABLEVITON_BASE = "https://splendid-throat-unflawed.ngrok-free.dev";
+
 type Slot = "person" | "garment";
+type Backend = "ootd" | "stableviton";
 
 interface UploadCardProps {
   slot: Slot;
@@ -102,13 +105,50 @@ const UploadCard = ({ slot, title, hint, file, preview, onFile }: UploadCardProp
 };
 
 /* ------------------------------------------------------------------ */
+/*  Selectable image tile (StableVITON gallery)                       */
+/* ------------------------------------------------------------------ */
+interface TileProps {
+  src: string;
+  name: string;
+  selected: boolean;
+  onClick: () => void;
+}
+const Tile = ({ src, name, selected, onClick }: TileProps) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={`relative aspect-[3/4] rounded-xl overflow-hidden border-2 transition-all duration-300 ${
+      selected ? "border-primary shadow-gold scale-[1.02]" : "border-border hover:border-primary/60"
+    }`}
+  >
+    <img src={src} alt={name} className="w-full h-full object-cover" loading="lazy" />
+    {selected && (
+      <div className="absolute top-2 right-2 w-7 h-7 rounded-full bg-primary text-primary-foreground flex items-center justify-center">
+        <Check size={14} />
+      </div>
+    )}
+  </button>
+);
+
+/* ------------------------------------------------------------------ */
 /*  TryOn page                                                         */
 /* ------------------------------------------------------------------ */
 const TryOn = () => {
+  const [backend, setBackend] = useState<Backend>("ootd");
+
+  // OOTDiffusion state
   const [person, setPerson] = useState<File | null>(null);
   const [garment, setGarment] = useState<File | null>(null);
   const [personPreview, setPersonPreview] = useState<string | null>(null);
   const [garmentPreview, setGarmentPreview] = useState<string | null>(null);
+
+  // StableVITON state
+  const [svPersonList, setSvPersonList] = useState<string[]>([]);
+  const [svClothList, setSvClothList] = useState<string[]>([]);
+  const [svPerson, setSvPerson] = useState<string | null>(null);
+  const [svCloth, setSvCloth] = useState<string | null>(null);
+  const [svListLoading, setSvListLoading] = useState(false);
+
   const [result, setResult] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -123,7 +163,25 @@ const TryOn = () => {
     setResult(null);
   }, []);
 
-  /** Read a File as a base64 data URL ("data:image/...;base64,..."). */
+  // Fetch StableVITON image lists when that backend is selected.
+  useEffect(() => {
+    if (backend !== "stableviton") return;
+    if (svPersonList.length || svClothList.length) return;
+    setSvListLoading(true);
+    fetch(`${STABLEVITON_BASE}/images`, { headers: { "ngrok-skip-browser-warning": "1" } })
+      .then((r) => r.json())
+      .then((d) => {
+        setSvPersonList(d.person_images ?? []);
+        setSvClothList(d.cloth_images ?? []);
+      })
+      .catch((e) => {
+        console.error(e);
+        toast.error("Could not reach StableVITON server.");
+      })
+      .finally(() => setSvListLoading(false));
+  }, [backend, svPersonList.length, svClothList.length]);
+
+  /** Read a File as a base64 data URL. */
   const fileToDataUrl = (file: File): Promise<string> =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -132,43 +190,32 @@ const TryOn = () => {
       reader.readAsDataURL(file);
     });
 
-  const generate = async () => {
+  const generateOOTD = async () => {
     if (!person || !garment) {
       toast.error("Please upload both a person and a garment image.");
       return;
     }
     setLoading(true);
     setResult(null);
-
     try {
-      // Convert both files to base64 data URLs for the edge function payload.
       const [personImage, garmentImage] = await Promise.all([
         fileToDataUrl(person),
         fileToDataUrl(garment),
       ]);
-
       const { data, error } = await supabase.functions.invoke("tryon-generate", {
         body: { personImage, garmentImage },
       });
-
       if (error) {
-        // Surface friendly messages for rate-limit / payment errors from the function.
         const ctx = (error as { context?: { status?: number } }).context;
-        if (ctx?.status === 429) {
-          toast.error("Too many requests. Please wait a moment and retry.");
-        } else if (ctx?.status === 402) {
-          toast.error("AI credits exhausted. Add funds in Workspace → Usage.");
-        } else {
-          toast.error(error.message || "Generation failed.");
-        }
+        if (ctx?.status === 429) toast.error("Too many requests. Please wait and retry.");
+        else if (ctx?.status === 402) toast.error("AI credits exhausted.");
+        else toast.error(error.message || "Generation failed.");
         return;
       }
-
       if (!data?.image) {
-        toast.error("The model did not return an image. Please try again.");
+        toast.error("The model did not return an image.");
         return;
       }
-
       setResult(data.image);
       toast.success("Try-on generated successfully");
     } catch (e) {
@@ -178,6 +225,37 @@ const TryOn = () => {
       setLoading(false);
     }
   };
+
+  const generateStableVITON = async () => {
+    if (!svPerson || !svCloth) {
+      toast.error("Please select a person and a cloth image.");
+      return;
+    }
+    setLoading(true);
+    setResult(null);
+    try {
+      const res = await fetch(`${STABLEVITON_BASE}/tryon`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
+        body: JSON.stringify({ person: svPerson, cloth: svCloth }),
+      });
+      if (!res.ok) {
+        toast.error(`StableVITON failed (${res.status}).`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setResult(url);
+      toast.success("Try-on generated successfully");
+    } catch (e) {
+      console.error(e);
+      toast.error("Could not reach StableVITON server.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const generate = () => (backend === "ootd" ? generateOOTD() : generateStableVITON());
 
   const download = () => {
     if (!result) return;
@@ -190,8 +268,13 @@ const TryOn = () => {
   const reset = () => {
     setPersonFile(null);
     setGarmentFile(null);
+    setSvPerson(null);
+    setSvCloth(null);
     setResult(null);
   };
+
+  const canGenerate =
+    backend === "ootd" ? !!(person && garment) : !!(svPerson && svCloth);
 
   return (
     <div className="relative">
@@ -199,47 +282,123 @@ const TryOn = () => {
       <div className="container relative py-16 md:py-24">
         {/* Header */}
         <Reveal>
-          <div className="text-center max-w-3xl mx-auto mb-16">
+          <div className="text-center max-w-3xl mx-auto mb-10">
             <p className="text-xs uppercase tracking-[0.3em] text-primary mb-4">The Studio</p>
             <h1 className="font-serif text-5xl md:text-6xl">
               Virtual <span className="gold-text italic">Try-On</span>
             </h1>
             <p className="mt-5 text-muted-foreground text-lg leading-relaxed">
-              Upload a person photo and a garment. Our pipeline will warp, blend and render
-              a photorealistic composition.
+              Choose a model backend, then compose your photorealistic try-on.
             </p>
           </div>
         </Reveal>
 
-        {/* Upload grid */}
-        <div className="grid md:grid-cols-2 gap-6 max-w-5xl mx-auto">
-          <Reveal>
-            <UploadCard
-              slot="person"
-              title="Person Image"
-              hint="A clear, front-facing full-body photo works best."
-              file={person}
-              preview={personPreview}
-              onFile={setPersonFile}
-            />
-          </Reveal>
-          <Reveal delay={120}>
-            <UploadCard
-              slot="garment"
-              title="Garment Image"
-              hint="A flat-lay or clean cut-out of the garment."
-              file={garment}
-              preview={garmentPreview}
-              onFile={setGarmentFile}
-            />
-          </Reveal>
+        {/* Backend toggle */}
+        <div className="flex justify-center mb-12">
+          <div className="inline-flex p-1 rounded-full border border-border bg-card">
+            {([
+              { id: "ootd", label: "OOTDiffusion" },
+              { id: "stableviton", label: "StableVITON" },
+            ] as { id: Backend; label: string }[]).map((b) => (
+              <button
+                key={b.id}
+                onClick={() => { setBackend(b.id); setResult(null); }}
+                className={`px-6 py-2.5 rounded-full text-sm uppercase tracking-widest transition-all ${
+                  backend === b.id
+                    ? "bg-gradient-gold text-primary-foreground shadow-gold"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {b.label}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {/* OOTDiffusion: upload grid */}
+        {backend === "ootd" && (
+          <div className="grid md:grid-cols-2 gap-6 max-w-5xl mx-auto">
+            <Reveal>
+              <UploadCard
+                slot="person"
+                title="Person Image"
+                hint="A clear, front-facing full-body photo works best."
+                file={person}
+                preview={personPreview}
+                onFile={setPersonFile}
+              />
+            </Reveal>
+            <Reveal delay={120}>
+              <UploadCard
+                slot="garment"
+                title="Garment Image"
+                hint="A flat-lay or clean cut-out of the garment."
+                file={garment}
+                preview={garmentPreview}
+                onFile={setGarmentFile}
+              />
+            </Reveal>
+          </div>
+        )}
+
+        {/* StableVITON: gallery picker */}
+        {backend === "stableviton" && (
+          <div className="max-w-6xl mx-auto space-y-12">
+            {svListLoading && (
+              <p className="text-center text-muted-foreground">Loading gallery from RTX 3090…</p>
+            )}
+
+            {!svListLoading && (
+              <>
+                <div>
+                  <div className="flex items-baseline justify-between mb-4">
+                    <h3 className="font-serif text-2xl">Select a person</h3>
+                    {svPerson && (
+                      <span className="text-xs uppercase tracking-widest text-primary">{svPerson}</span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+                    {svPersonList.map((name) => (
+                      <Tile
+                        key={name}
+                        src={`${STABLEVITON_BASE}/person/${name}`}
+                        name={name}
+                        selected={svPerson === name}
+                        onClick={() => { setSvPerson(name); setResult(null); }}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-baseline justify-between mb-4">
+                    <h3 className="font-serif text-2xl">Select a garment</h3>
+                    {svCloth && (
+                      <span className="text-xs uppercase tracking-widest text-primary">{svCloth}</span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+                    {svClothList.map((name) => (
+                      <Tile
+                        key={name}
+                        src={`${STABLEVITON_BASE}/cloth/${name}`}
+                        name={name}
+                        selected={svCloth === name}
+                        onClick={() => { setSvCloth(name); setResult(null); }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Action bar */}
         <div className="flex flex-wrap items-center justify-center gap-4 mt-12">
           <button
             onClick={generate}
-            disabled={loading || !person || !garment}
+            disabled={loading || !canGenerate}
             className="group inline-flex items-center gap-3 px-9 py-4 rounded-full bg-gradient-gold text-primary-foreground shadow-gold hover:shadow-elegant transition-all duration-500 ease-elegant hover:scale-[1.03] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
           >
             {loading ? (
@@ -252,7 +411,7 @@ const TryOn = () => {
               </>
             )}
           </button>
-          {(person || garment || result) && (
+          {(person || garment || result || svPerson || svCloth) && (
             <button
               onClick={reset}
               className="inline-flex items-center gap-2 px-6 py-4 rounded-full border border-border bg-card hover:bg-muted transition-all"
@@ -268,7 +427,9 @@ const TryOn = () => {
             <div className="rounded-2xl overflow-hidden shadow-card border border-border">
               <div className="aspect-[4/5] shimmer" />
               <div className="p-6 bg-card text-center text-sm text-muted-foreground">
-                Aligning warp mask · Applying ATV smoothing · Rendering…
+                {backend === "stableviton"
+                  ? "Running StableVITON on RTX 3090…"
+                  : "Aligning warp mask · Applying ATV smoothing · Rendering…"}
               </div>
             </div>
           )}
@@ -279,7 +440,7 @@ const TryOn = () => {
                 <div className="relative">
                   <img src={result} alt="Try-on result" className="w-full max-h-[700px] object-contain bg-muted" />
                   <span className="absolute top-4 left-4 px-3 py-1 rounded-full glass text-xs uppercase tracking-widest">
-                    Result
+                    {backend === "stableviton" ? "StableVITON" : "OOTDiffusion"}
                   </span>
                 </div>
                 <div className="p-6 flex items-center justify-between flex-wrap gap-4">
