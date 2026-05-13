@@ -49,22 +49,6 @@ const Index = () => {
                 Explore the Pipeline
               </Link>
             </div>
-
-            <div className="flex flex-wrap gap-4 pt-2">
-              <Link
-                to="/tryon"
-                className="group inline-flex items-center gap-2 px-7 py-3.5 rounded-full bg-gradient-gold text-primary-foreground shadow-gold hover:shadow-elegant transition-all duration-500 ease-elegant hover:scale-[1.03]"
-              >
-                Enter the Studio
-                <ArrowRight size={18} className="transition-transform group-hover:translate-x-1" />
-              </Link>
-              <Link
-                to="/about"
-                className="inline-flex items-center gap-2 px-7 py-3.5 rounded-full border border-border bg-card/60 backdrop-blur text-foreground hover:bg-card transition-all duration-300"
-              >
-                Explore the Pipeline
-              </Link>
-            </div>
           </div>
 
           <div className="relative animate-scale-in">
