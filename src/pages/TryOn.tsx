@@ -113,22 +113,48 @@ interface TileProps {
   selected: boolean;
   onClick: () => void;
 }
-const Tile = ({ src, name, selected, onClick }: TileProps) => (
-  <button
-    type="button"
-    onClick={onClick}
-    className={`relative aspect-[3/4] rounded-xl overflow-hidden border-2 transition-all duration-300 ${
-      selected ? "border-primary shadow-gold scale-[1.02]" : "border-border hover:border-primary/60"
-    }`}
-  >
-    <img src={src} alt={name} className="w-full h-full object-cover" loading="lazy" />
-    {selected && (
-      <div className="absolute top-2 right-2 w-7 h-7 rounded-full bg-primary text-primary-foreground flex items-center justify-center">
-        <Check size={14} />
-      </div>
-    )}
-  </button>
-);
+const Tile = ({ src, name, selected, onClick }: TileProps) => {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch(src, { headers: { "ngrok-skip-browser-warning": "true" } })
+      .then((r) => r.blob())
+      .then((blob) => {
+        if (active) setBlobUrl(URL.createObjectURL(blob));
+      })
+      .catch(() => {
+        // fallback to direct src if fetch fails
+        if (active) setBlobUrl(src);
+      });
+    return () => {
+      active = false;
+      if (blobUrl && blobUrl.startsWith("blob:")) URL.revokeObjectURL(blobUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src]);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`relative aspect-[3/4] rounded-xl overflow-hidden border-2 transition-all duration-300 ${
+        selected ? "border-primary shadow-gold scale-[1.02]" : "border-border hover:border-primary/60"
+      }`}
+    >
+      {blobUrl ? (
+        <img src={blobUrl} alt={name} className="w-full h-full object-cover" loading="lazy" />
+      ) : (
+        <div className="w-full h-full bg-muted animate-pulse" />
+      )}
+      {selected && (
+        <div className="absolute top-2 right-2 w-7 h-7 rounded-full bg-primary text-primary-foreground flex items-center justify-center">
+          <Check size={14} />
+        </div>
+      )}
+    </button>
+  );
+};
 
 /* ------------------------------------------------------------------ */
 /*  TryOn page                                                         */
@@ -168,7 +194,7 @@ const TryOn = () => {
     if (backend !== "stableviton") return;
     if (svPersonList.length || svClothList.length) return;
     setSvListLoading(true);
-    fetch(`${STABLEVITON_BASE}/images`, { headers: { "ngrok-skip-browser-warning": "1" } })
+    fetch(`${STABLEVITON_BASE}/images`, { headers: { "ngrok-skip-browser-warning": "true" } })
       .then((r) => r.json())
       .then((d) => {
         setSvPersonList(d.person_images ?? []);
@@ -236,7 +262,7 @@ const TryOn = () => {
     try {
       const res = await fetch(`${STABLEVITON_BASE}/tryon`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
         body: JSON.stringify({ person: svPerson, cloth: svCloth }),
       });
       if (!res.ok) {
