@@ -118,7 +118,12 @@ const Tile = ({ src, name, selected, onClick }: TileProps) => {
 
   useEffect(() => {
     let active = true;
-    fetch(src, { headers: { "ngrok-skip-browser-warning": "true" } })
+    fetch(src, {
+      headers: {
+        "ngrok-skip-browser-warning": "true",
+        "User-Agent": "Mozilla/5.0",
+      },
+    })
       .then((r) => r.blob())
       .then((blob) => {
         if (active) setBlobUrl(URL.createObjectURL(blob));
