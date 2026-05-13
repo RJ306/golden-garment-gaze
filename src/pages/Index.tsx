@@ -20,7 +20,7 @@ const Index = () => {
           <div className="animate-fade-in space-y-8">
             <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full glass text-xs uppercase tracking-[0.2em] text-muted-foreground">
               <Sparkles size={14} className="text-primary" />
-              Final Year Project · 2025
+              AI-Powered Virtual Try-On
             </span>
 
             <h1 className="font-serif text-5xl md:text-6xl lg:text-7xl leading-[1.05] font-medium">
@@ -50,19 +50,20 @@ const Index = () => {
               </Link>
             </div>
 
-            <div className="flex gap-10 pt-6 border-t border-border/60 max-w-md">
-              <div>
-                <div className="font-serif text-3xl gold-text">98<span className="text-base">%</span></div>
-                <div className="text-xs uppercase tracking-widest text-muted-foreground mt-1">Cloth Fidelity</div>
-              </div>
-              <div>
-                <div className="font-serif text-3xl gold-text">2.4<span className="text-base">s</span></div>
-                <div className="text-xs uppercase tracking-widest text-muted-foreground mt-1">Inference</div>
-              </div>
-              <div>
-                <div className="font-serif text-3xl gold-text">12k+</div>
-                <div className="text-xs uppercase tracking-widest text-muted-foreground mt-1">Eastern Samples</div>
-              </div>
+            <div className="flex flex-wrap gap-4 pt-2">
+              <Link
+                to="/tryon"
+                className="group inline-flex items-center gap-2 px-7 py-3.5 rounded-full bg-gradient-gold text-primary-foreground shadow-gold hover:shadow-elegant transition-all duration-500 ease-elegant hover:scale-[1.03]"
+              >
+                Enter the Studio
+                <ArrowRight size={18} className="transition-transform group-hover:translate-x-1" />
+              </Link>
+              <Link
+                to="/about"
+                className="inline-flex items-center gap-2 px-7 py-3.5 rounded-full border border-border bg-card/60 backdrop-blur text-foreground hover:bg-card transition-all duration-300"
+              >
+                Explore the Pipeline
+              </Link>
             </div>
           </div>
 
@@ -81,10 +82,6 @@ const Index = () => {
                   "Every thread, faithfully rendered."
                 </p>
               </div>
-            </div>
-            <div className="absolute -bottom-6 -left-6 glass rounded-2xl p-4 shadow-card animate-float">
-              <div className="text-xs uppercase tracking-widest text-muted-foreground">Powered by</div>
-              <div className="font-serif text-lg">StableVITON · ATV</div>
             </div>
           </div>
         </div>
@@ -202,9 +199,9 @@ const Index = () => {
 
           <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-6 max-w-5xl mx-auto">
             {[
-              { name: "Aisha Rahman", role: "Research Lead", initials: "AR" },
-              { name: "Daniyal Ahmed", role: "ML Engineer", initials: "DA" },
-              { name: "Saira Khan", role: "Frontend & UX", initials: "SK" },
+              { name: "Rafia Jamil", role: "Research Lead", initials: "RJ" },
+              { name: "Anaksha Janki", role: "ML Engineer", initials: "AJ" },
+              { name: "Shaeel Khalil", role: "Frontend & UX", initials: "SK" },
             ].map((m, i) => (
               <Reveal key={m.name} delay={i * 120}>
                 <div className="group p-8 rounded-2xl bg-card border border-border shadow-card hover:shadow-gold transition-all duration-500 ease-elegant hover:-translate-y-1 text-center">
