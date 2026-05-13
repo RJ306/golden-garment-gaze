@@ -199,7 +199,12 @@ const TryOn = () => {
     if (backend !== "stableviton") return;
     if (svPersonList.length || svClothList.length) return;
     setSvListLoading(true);
-    fetch(`${STABLEVITON_BASE}/images`, { headers: { "ngrok-skip-browser-warning": "true" } })
+    fetch(`${STABLEVITON_BASE}/images`, {
+      headers: {
+        "ngrok-skip-browser-warning": "true",
+        "User-Agent": "Mozilla/5.0",
+      },
+    })
       .then((r) => r.json())
       .then((d) => {
         setSvPersonList(d.person_images ?? []);
@@ -267,7 +272,11 @@ const TryOn = () => {
     try {
       const res = await fetch(`${STABLEVITON_BASE}/tryon`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        headers: {
+          "Content-Type": "application/json",
+          "ngrok-skip-browser-warning": "true",
+          "User-Agent": "Mozilla/5.0",
+        },
         body: JSON.stringify({ person: svPerson, cloth: svCloth }),
       });
       if (!res.ok) {
